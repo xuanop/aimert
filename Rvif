@@ -1,0 +1,685 @@
+-- 環境保護
+if getgenv().UltimateCombatLoaded then return end
+getgenv().UltimateCombatLoaded = true
+
+-- 載入必要庫
+local success1, Rayfield = pcall(function()
+    return loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+end)
+if not success1 then
+    warn("Rayfield UI 載入失敗")
+    return
+end
+
+-- 載入 Drawing 庫
+local success2, DrawingLib = pcall(function()
+    return loadstring(game:HttpGet('https://raw.githubusercontent.com/vcokltfre/DrawingLib/main/Library.lua'))()
+end)
+if not success2 then
+    DrawingLib = { new = function(className) return Drawing.new(className) end }
+end
+
+-- 服務
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local Camera = Workspace.CurrentCamera
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- ============ 反反作弊侦察系统 ============
+local AntiAntiCheat = {
+    Enabled = true,
+    ShowNotifications = true,
+    AutoBypass = true,
+    DetectedAC = {},
+    Log = {}
+}
+
+local KnownAntiCheats = {
+    "Kronos", "Sirius", "Solara", "Fluxus", "Wave", "Hyperion", "Byfron", "RobloxAntiCheat",
+    "AC_", "AntiCheat", "Anti_Cheat", "ServerGuard", "Adonis", "SecureNet", "Vermillion", "Celery"
+}
+
+local function logDetection(text)
+    table.insert(AntiAntiCheat.Log, os.date("%H:%M:%S") .. " | " .. text)
+    if #AntiAntiCheat.Log > 50 then table.remove(AntiAntiCheat.Log, 1) end
+    print("[AntiAntiCheat] " .. text)
+    if AntiAntiCheat.ShowNotifications then
+        pcall(function()
+            Rayfield:Notify({Title = "🔍 反作弊侦察", Content = text, Duration = 3, Image = 4483362458})
+        end)
+    end
+end
+
+local function scanForAntiCheat()
+    if not AntiAntiCheat.Enabled then return end
+    AntiAntiCheat.DetectedAC = {}
+    local startTime = tick()
+    pcall(function()
+        local placesToScan = { Workspace, ReplicatedStorage, game:GetService("ServerStorage") }
+        for _, container in ipairs(placesToScan) do
+            for _, name in ipairs(KnownAntiCheats) do
+                for _, obj in ipairs(container:GetChildren()) do
+                    if obj.Name:find(name) then
+                        logDetection("檢測到: " .. obj.Name .. " (" .. container.Name .. ")")
+                    end
+                end
+            end
+        end
+    end)
+    logDetection("輕量掃描完成 (" .. math.floor((tick() - startTime)*1000) .. "ms)")
+end
+
+-- ============ 变量声明 ============
+-- 自瞄
+local AimbotEnabled = false
+local AimbotFOV = 100
+local AimbotTargetPart = "Auto"
+local AimbotShowFOV = true
+local AimbotTeamCheck = false
+local AimbotWallCheck = false
+local AimbotMaxDistance = 500
+local AimbotSmoothing = 0.2
+local AIAssist = false
+local PredictionTime = 0.15
+local AimMode = "RightClick"         -- Always / LeftClick / RightClick
+local AimMethod = "Camera"           -- Camera / Rivals / Mouse
+
+local CurrentTarget = nil
+local CurrentAimPos = nil
+local TargetData = {}
+local FOVCircle = nil
+
+-- 透視
+local ESPEnabled = false
+local ESPObjects = {}
+local ESPShowBox = true
+local ESPShowName = true
+local ESPShowHealth = true
+local ESPShowHealthBar = true
+local ESPShowDistance = true
+local ESPShowWeapon = true
+local ESPShowTracers = true
+local ESPShowHeadDot = true
+local ESPMaxDistance = 1000
+local ESPTeamCheck = false
+
+-- 飛行
+local FlyEnabled = false
+local FlySpeed = 50
+local FlyKeys = {W=false, S=false, A=false, D=false, Space=false, LCtrl=false}
+local FlyBodyGyro = nil
+local FlyBodyVelocity = nil
+
+-- 传送
+local savedGroundPosition = nil
+
+-- ============ 飛行系統 ============
+local function stopFly()
+    pcall(function()
+        if FlyBodyGyro then FlyBodyGyro:Destroy() end
+        if FlyBodyVelocity then FlyBodyVelocity:Destroy() end
+    end)
+    FlyBodyGyro = nil; FlyBodyVelocity = nil
+    pcall(function()
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChild("Humanoid")
+            if hum then hum.PlatformStand = false end
+        end
+    end)
+end
+
+local function startFly()
+    stopFly()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChild("Humanoid")
+    if not root or not hum then return end
+    pcall(function()
+        hum.PlatformStand = true
+        FlyBodyGyro = Instance.new("BodyGyro")
+        FlyBodyGyro.Name = "FlyGyro"; FlyBodyGyro.MaxTorque = Vector3.new(1,1,1) * 400000
+        FlyBodyGyro.P = 30000; FlyBodyGyro.Parent = root
+        FlyBodyVelocity = Instance.new("BodyVelocity")
+        FlyBodyVelocity.Name = "FlyVelocity"; FlyBodyVelocity.MaxForce = Vector3.new(1,1,1) * 400000
+        FlyBodyVelocity.P = 50000; FlyBodyVelocity.Velocity = Vector3.zero
+        FlyBodyVelocity.Parent = root
+    end)
+end
+
+RunService.Heartbeat:Connect(function()
+    if not FlyEnabled then return end
+    if not FlyBodyVelocity or not FlyBodyGyro then if FlyEnabled then startFly() end; return end
+    local dir = Vector3.zero
+    local cam = Camera.CFrame
+    if FlyKeys.W then dir += cam.LookVector end
+    if FlyKeys.S then dir -= cam.LookVector end
+    if FlyKeys.A then dir -= cam.RightVector end
+    if FlyKeys.D then dir += cam.RightVector end
+    if FlyKeys.Space then dir += Vector3.new(0,1,0) end
+    if FlyKeys.LCtrl then dir -= Vector3.new(0,1,0) end
+    dir = dir.Magnitude > 0 and dir.Unit * FlySpeed or Vector3.zero
+    FlyBodyVelocity.Velocity = dir
+    FlyBodyGyro.CFrame = cam
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.6)
+    if FlyEnabled then startFly() end
+end)
+
+-- FOV 圓圈
+local function createFOV()
+    if FOVCircle then pcall(function() FOVCircle:Remove() end) end
+    pcall(function()
+        FOVCircle = Drawing.new("Circle")
+        if FOVCircle then
+            FOVCircle.Visible = AimbotShowFOV
+            FOVCircle.Color = Color3.fromRGB(255, 255, 255)
+            FOVCircle.Thickness = 1; FOVCircle.NumSides = 60
+            FOVCircle.Radius = AimbotFOV; FOVCircle.Filled = false
+            FOVCircle.Transparency = 0.7
+        end
+    end)
+end
+
+-- ============ 自瞄核心 ============
+-- 智能部位檢測
+local function getBestTargetPart(char)
+    if AimbotTargetPart ~= "Auto" then return AimbotTargetPart end
+    if not char then return "Head" end
+    local priority = {"Head", "UpperTorso", "HumanoidRootPart", "LowerTorso"}
+    for _, name in ipairs(priority) do
+        if char:FindFirstChild(name) then return name end
+    end
+    return "Head"
+end
+
+-- 自瞄目標尋找
+local function findAimbotTarget()
+    local closestPlayer = nil
+    local closestDist = AimbotFOV
+    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    local now = tick()
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        if AimbotTeamCheck and player.Team == LocalPlayer.Team then continue end
+        local char = player.Character
+        if not char then continue end
+        local humanoid = char:FindFirstChild("Humanoid")
+        if not humanoid or humanoid.Health <= 0 then continue end
+        local partName = getBestTargetPart(char)
+        local targetPart = char:FindFirstChild(partName)
+        if not targetPart then continue end
+        local pos = targetPart.Position
+        local data = TargetData[player] or {pos = pos, time = now, velocity = Vector3.zero}
+        local dt = now - data.time
+        if dt > 0 then data.velocity = (pos - data.pos) / dt end
+        data.pos = pos; data.time = now; TargetData[player] = data
+        if AimbotWallCheck then
+            local myHead = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Head")
+            if myHead then
+                local rayParams = RaycastParams.new()
+                rayParams.FilterDescendantsInstances = {LocalPlayer.Character, char}
+                rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+                local toTarget = pos - myHead.Position
+                local distToTarget = toTarget.Magnitude
+                if distToTarget > 0 and Workspace:Raycast(myHead.Position, toTarget.Unit * (distToTarget + 1), rayParams) then continue end
+            end
+        end
+        local camPos = Camera.CFrame.Position
+        local distance = (pos - camPos).Magnitude
+        if distance > AimbotMaxDistance then continue end
+        local screenPos, onScreen = Camera:WorldToViewportPoint(pos)
+        if not onScreen then continue end
+        local dist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+        if dist < closestDist then closestDist = dist; closestPlayer = player end
+    end
+    if closestPlayer then
+        local char = closestPlayer.Character
+        local partName = getBestTargetPart(char)
+        local targetPart = char:FindFirstChild(partName)
+        if targetPart then
+            local aimPos = targetPart.Position
+            if AIAssist then
+                local data = TargetData[closestPlayer]
+                if data and data.velocity.Magnitude > 0.5 then
+                    aimPos = aimPos + data.velocity * PredictionTime
+                end
+            end
+            return closestPlayer, aimPos
+        end
+    end
+    return nil, nil
+end
+
+-- ESP 函数（保留 aimScreenPos 储存）
+local function createESP(player)
+    if ESPObjects[player] then return end
+    local esp = {}
+    pcall(function() esp.Box = Drawing.new("Square") end)
+    pcall(function() esp.Name = Drawing.new("Text") end)
+    pcall(function() esp.Health = Drawing.new("Text") end)
+    pcall(function() esp.HealthBarBG = Drawing.new("Square") end)
+    pcall(function() esp.HealthBar = Drawing.new("Square") end)
+    pcall(function() esp.Distance = Drawing.new("Text") end)
+    pcall(function() esp.Weapon = Drawing.new("Text") end)
+    pcall(function() esp.Tracer = Drawing.new("Line") end)
+    pcall(function() esp.HeadDot = Drawing.new("Circle") end)
+    pcall(function()
+        if esp.HealthBarBG then esp.HealthBarBG.Color=Color3.fromRGB(0,0,0); esp.HealthBarBG.Filled=true; esp.HealthBarBG.Thickness=1; esp.HealthBarBG.Transparency=0.8; esp.HealthBarBG.Visible=false end
+    end)
+    pcall(function()
+        if esp.HealthBar then esp.HealthBar.Color=Color3.fromRGB(0,255,0); esp.HealthBar.Filled=true; esp.HealthBar.Thickness=1; esp.HealthBar.Transparency=1; esp.HealthBar.Visible=false end
+    end)
+    pcall(function() if esp.Box then esp.Box.Thickness=2; esp.Box.Color=Color3.fromRGB(255,50,50); esp.Box.Filled=false; esp.Box.Visible=false end end)
+    pcall(function() if esp.Name then esp.Name.Center=true; esp.Name.Outline=true; esp.Name.Color=Color3.fromRGB(255,255,255); esp.Name.Size=14; esp.Name.Visible=false end end)
+    if esp.Health then esp.Health.Center=true; esp.Health.Outline=true; esp.Health.Size=12; esp.Health.Visible=false end
+    if esp.Distance then esp.Distance.Center=true; esp.Distance.Outline=true; esp.Distance.Color=Color3.fromRGB(180,180,180); esp.Distance.Size=12; esp.Distance.Visible=false end
+    if esp.Weapon then esp.Weapon.Center=true; esp.Weapon.Outline=true; esp.Weapon.Color=Color3.fromRGB(255,200,100); esp.Weapon.Size=11; esp.Weapon.Visible=false end
+    if esp.Tracer then esp.Tracer.Thickness=1; esp.Tracer.Transparency=0.5; esp.Tracer.Visible=false end
+    if esp.HeadDot then esp.HeadDot.Radius=4; esp.HeadDot.Filled=true; esp.HeadDot.Color=Color3.fromRGB(255,255,0); esp.HeadDot.NumSides=16; esp.HeadDot.Visible=false end
+
+    esp.aimScreenPos = nil
+    ESPObjects[player] = esp
+end
+
+local function removeESP(player)
+    local esp = ESPObjects[player]
+    if esp then for _,d in pairs(esp) do pcall(function() d:Remove() end) end; ESPObjects[player]=nil end
+end
+
+local function clearAllESP()
+    for player,esp in pairs(ESPObjects) do
+        if esp then for _,d in pairs(esp) do pcall(function() if d then d:Remove() end end) end end
+    end
+    ESPObjects = {}
+end
+
+local function updateESP(player, esp)
+    local char = player.Character
+    if not char then for _,d in pairs(esp) do if d then d.Visible=false end end; esp.aimScreenPos=nil; return end
+    local humanoid = char:FindFirstChild("Humanoid"); local head = char:FindFirstChild("Head"); local root = char:FindFirstChild("HumanoidRootPart")
+    if not humanoid or humanoid.Health<=0 or not head or not root then for _,d in pairs(esp) do if d then d.Visible=false end end; esp.aimScreenPos=nil; return end
+    if ESPTeamCheck and player.Team==LocalPlayer.Team then for _,d in pairs(esp) do if d then d.Visible=false end end; esp.aimScreenPos=nil; return end
+    local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local dist = myRoot and (root.Position - myRoot.Position).Magnitude or 0
+    if dist > ESPMaxDistance then for _,d in pairs(esp) do if d then d.Visible=false end end; esp.aimScreenPos=nil; return end
+    local headPos, headOnScreen = Camera:WorldToViewportPoint(head.Position)
+    local rootPos, rootOnScreen = Camera:WorldToViewportPoint(root.Position)
+    if not headOnScreen and not rootOnScreen then for _,d in pairs(esp) do if d then d.Visible=false end end; esp.aimScreenPos=nil; return end
+    local screenY = headOnScreen and headPos.Y or rootPos.Y; local screenX = rootOnScreen and rootPos.X or headPos.X
+    local boxHeight=100; local boxWidth=50; local boxX=screenX - boxWidth/2; local boxY=screenY - boxHeight*0.1
+    -- 绘制
+    if esp.HealthBarBG and esp.HealthBar and ESPShowHealthBar then
+        local barWidth=6; local barHeight=boxHeight; local hpRatio = humanoid.Health/humanoid.MaxHealth
+        esp.HealthBarBG.Visible=true; esp.HealthBarBG.Position=Vector2.new(boxX - barWidth - 4, boxY); esp.HealthBarBG.Size=Vector2.new(barWidth, barHeight)
+        esp.HealthBar.Visible=true; esp.HealthBar.Position=Vector2.new(boxX - barWidth - 4, boxY + barHeight*(1-hpRatio)); esp.HealthBar.Size=Vector2.new(barWidth, barHeight*hpRatio)
+        esp.HealthBar.Color = hpRatio>0.5 and Color3.fromRGB(0,255,0) or (hpRatio>0.25 and Color3.fromRGB(255,255,0) or Color3.fromRGB(255,0,0))
+    elseif esp.HealthBarBG then esp.HealthBarBG.Visible=false; if esp.HealthBar then esp.HealthBar.Visible=false end end
+    if esp.Health and ESPShowHealth then
+        esp.Health.Visible=true; local hp=math.floor(humanoid.Health); esp.Health.Position=Vector2.new(screenX, boxY+boxHeight+5); esp.Health.Text=hp.." HP"
+        esp.Health.Color = hp/humanoid.MaxHealth>0.5 and Color3.fromRGB(0,255,0) or (hp/humanoid.MaxHealth>0.25 and Color3.fromRGB(255,255,0) or Color3.fromRGB(255,0,0))
+    elseif esp.Health then esp.Health.Visible=false end
+    if esp.Distance and ESPShowDistance then esp.Distance.Visible=true; esp.Distance.Position=Vector2.new(screenX, boxY+boxHeight+18); esp.Distance.Text=math.floor(dist).."m" elseif esp.Distance then esp.Distance.Visible=false end
+    if esp.Box and ESPShowBox then esp.Box.Visible=true; esp.Box.Position=Vector2.new(boxX, boxY); esp.Box.Size=Vector2.new(boxWidth, boxHeight) elseif esp.Box then esp.Box.Visible=false end
+    if esp.Name and ESPShowName then esp.Name.Visible=true; esp.Name.Position=Vector2.new(screenX, boxY-15); esp.Name.Text=player.Name elseif esp.Name then esp.Name.Visible=false end
+    if esp.Weapon and ESPShowWeapon then
+        esp.Weapon.Visible=true; local toolName=""
+        for _,child in ipairs(char:GetChildren()) do if child:IsA("Tool") then toolName=child.Name; break end end
+        esp.Weapon.Position=Vector2.new(screenX, boxY+boxHeight+30); esp.Weapon.Text=toolName
+    elseif esp.Weapon then esp.Weapon.Visible=false end
+    if esp.Tracer and ESPShowTracers then esp.Tracer.Visible=true; esp.Tracer.From=Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y); esp.Tracer.To=Vector2.new(screenX, boxY) elseif esp.Tracer then esp.Tracer.Visible=false end
+    if esp.HeadDot and ESPShowHeadDot and headOnScreen then esp.HeadDot.Visible=true; esp.HeadDot.Position=Vector2.new(headPos.X, headPos.Y) elseif esp.HeadDot then esp.HeadDot.Visible=false end
+    -- 储存瞄准坐标
+    local aimPartName = getBestTargetPart(char)
+    local aimPart = char:FindFirstChild(aimPartName)
+    if aimPart then
+        local aimPos, aimOnScreen = Camera:WorldToViewportPoint(aimPart.Position)
+        if aimOnScreen then esp.aimScreenPos = Vector2.new(aimPos.X, aimPos.Y)
+        else esp.aimScreenPos = nil end
+    else esp.aimScreenPos = nil end
+end
+
+-- 初始化 FOV
+task.spawn(createFOV)
+
+-- Namecall 保护 Hook（仅反作弊）
+local oldNamecall
+pcall(function()
+    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+        local success, method = pcall(getnamecallmethod)
+        if not success then return oldNamecall(self, ...) end
+
+        if not AntiAntiCheat.AutoBypass then 
+            return oldNamecall(self, ...) 
+        end
+        if method == "Kick" or method == "kick" then
+            logDetection("已成功拦截 Kick 尝试！")
+            return
+        end
+        if self and self.Name and (self.Name:lower():find("anti") or self.Name:lower():find("cheat")) and 
+           (method == "FireServer" or method == "InvokeServer") then
+            logDetection("已拦截可疑反作弊 Remote: " .. self.Name)
+            return
+        end
+
+        return oldNamecall(self, ...)
+    end)
+end)
+if not oldNamecall then
+    warn("Namecall Hook 注入失敗")
+end
+
+-- ============ 传送功能函数 ============
+local function teleportTo(targetPos)
+    if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        return false
+    end
+    LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(targetPos)
+    return true
+end
+
+local function getPlayerList()
+    local list = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            table.insert(list, plr.Name)
+        end
+    end
+    return list
+end
+
+-- ============ UI 建立 ============
+local Window = Rayfield:CreateWindow({
+    Name = "终极战斗辅助 - 反反作弊版",
+    LoadingTitle = "loading...",
+    LoadingSubtitle = "By Xuan and GrokAi",
+    ConfigurationSaving = {
+        Enabled = true,
+        FolderName = "UltimateCombatFix",
+        FileName = "Config"
+    }
+})
+
+-- 反反作弊分页
+local AACTab = Window:CreateTab("🛡️ 反反作弊侦察", 4483362458)
+AACTab:CreateToggle({Name = "启用侦察系统", CurrentValue = true, Callback = function(Value) AntiAntiCheat.Enabled = Value end})
+AACTab:CreateToggle({Name = "显示侦察通知", CurrentValue = true, Callback = function(Value) AntiAntiCheat.ShowNotifications = Value end})
+AACTab:CreateToggle({Name = "自动Namecall保护", CurrentValue = true, Callback = function(Value) AntiAntiCheat.AutoBypass = Value end})
+AACTab:CreateButton({Name = "立即全服扫描", Callback = function() scanForAntiCheat() end})
+AACTab:CreateButton({Name = "查看侦察日志", Callback = function()
+    local logText = table.concat(AntiAntiCheat.Log, "\n")
+    Rayfield:Notify({Title = "侦察日志", Content = logText ~= "" and logText or "暂无日志", Duration = 8})
+end})
+AACTab:CreateButton({Name = "銷毀腳本", Callback = function()
+    pcall(function() aimbotConnection:Disconnect() end)
+    pcall(function() espConnection:Disconnect() end)
+    pcall(function() flyInputBeganConn:Disconnect() end)
+    pcall(function() flyInputEndedConn:Disconnect() end)
+    stopFly(); clearAllESP()
+    if FOVCircle then pcall(function() FOVCircle:Remove() end) end
+    getgenv().UltimateCombatLoaded = false
+    pcall(function() Rayfield:Destroy() end)
+    print("脚本已安全销毁")
+end})
+
+-- 自瞄分页
+local AimbotTab = Window:CreateTab("🎯 自瞄", 4483362458)
+AimbotTab:CreateToggle({Name = "啟用自瞄", CurrentValue = false, Callback = function(Value) AimbotEnabled = Value end})
+AimbotTab:CreateToggle({Name = "AI辅助（预测移动）", CurrentValue = false, Callback = function(Value) AIAssist = Value end})
+AimbotTab:CreateSlider({Name = "预测时间 (秒)", Range = {0.05, 0.5}, Increment = 0.01, CurrentValue = 0.15, Callback = function(Value) PredictionTime = Value end})
+AimbotTab:CreateSlider({Name = "FOV大小", Range = {30, 1000}, Increment = 10, CurrentValue = 100, Callback = function(Value) AimbotFOV = Value; if FOVCircle then FOVCircle.Radius = Value end end})
+AimbotTab:CreateSlider({Name = "自瞄最大距離", Range = {50, 2000}, Increment = 50, CurrentValue = 500, Callback = function(Value) AimbotMaxDistance = Value end})
+AimbotTab:CreateSlider({Name = "平滑度", Range = {0.1, 1}, Increment = 0.05, CurrentValue = 0.2, Callback = function(Value) AimbotSmoothing = Value end})
+AimbotTab:CreateToggle({Name = "顯示FOV圓圈", CurrentValue = true, Callback = function(Value) AimbotShowFOV = Value; if FOVCircle then FOVCircle.Visible = Value end end})
+AimbotTab:CreateToggle({Name = "隊伍檢查", CurrentValue = false, Callback = function(Value) AimbotTeamCheck = Value end})
+AimbotTab:CreateToggle({Name = "牆後檢查(开启Rivals专用时必开)", CurrentValue = false, Callback = function(Value) AimbotWallCheck = Value end})
+
+-- 自瞄模式选择（触发方式）
+AimbotTab:CreateDropdown({
+    Name = "自瞄模式",
+    Options = {"始终自瞄", "左键自瞄", "右键自瞄"},
+    CurrentOption = {"右键自瞄"},
+    Callback = function(Value)
+        local selected = Value[1]
+        if selected == "始终自瞄" then AimMode = "Always"
+        elseif selected == "左键自瞄" then AimMode = "LeftClick"
+        else AimMode = "RightClick" end
+        print("自瞄模式已切换为: " .. selected)
+    end
+})
+
+-- 瞄准方式选择（视角锁定 / Rivals专用 / 鼠标移动）
+AimbotTab:CreateDropdown({
+    Name = "瞄准方式",
+    Options = {"视角锁定", "Rivals专用", "鼠标移动(可能失效)"},
+    CurrentOption = {"视角锁定"},
+    Callback = function(Value)
+        if Value[1] == "视角锁定" then
+            AimMethod = "Camera"
+        elseif Value[1] == "Rivals专用" then
+            AimMethod = "Rivals"
+        else
+            AimMethod = "Mouse"
+        end
+        print("瞄准方式切换为: " .. Value[1])
+    end
+})
+
+-- 瞄準部位
+AimbotTab:CreateDropdown({
+    Name = "瞄準部位",
+    Options = {"Auto (智能推薦)", "Head", "UpperTorso", "HumanoidRootPart", "LowerTorso"},
+    CurrentOption = {"Auto (智能推薦)"},
+    Callback = function(Value)
+        local selected = Value[1]
+        AimbotTargetPart = (selected == "Auto (智能推薦)") and "Auto" or selected
+        print("瞄準部位已設定為: " .. AimbotTargetPart)
+    end
+})
+
+-- 透視分页
+local ESPTab = Window:CreateTab("👁️ 透視", 4483362458)
+ESPTab:CreateToggle({Name = "啟用透視", CurrentValue = false, Callback = function(Value)
+    ESPEnabled = Value
+    if Value then for _, player in ipairs(Players:GetPlayers()) do if player ~= LocalPlayer then createESP(player) end end
+    else clearAllESP() end
+end})
+ESPTab:CreateToggle({Name = "顯示方框", CurrentValue = true, Callback = function(v) ESPShowBox = v end})
+ESPTab:CreateToggle({Name = "顯示名稱", CurrentValue = true, Callback = function(v) ESPShowName = v end})
+ESPTab:CreateToggle({Name = "顯示血量", CurrentValue = true, Callback = function(v) ESPShowHealth = v end})
+ESPTab:CreateToggle({Name = "顯示距離", CurrentValue = true, Callback = function(v) ESPShowDistance = v end})
+ESPTab:CreateToggle({Name = "顯示武器", CurrentValue = true, Callback = function(v) ESPShowWeapon = v end})
+ESPTab:CreateToggle({Name = "顯示追蹤線", CurrentValue = true, Callback = function(v) ESPShowTracers = v end})
+ESPTab:CreateToggle({Name = "顯示頭點", CurrentValue = true, Callback = function(v) ESPShowHeadDot = v end})
+ESPTab:CreateToggle({Name = "隊伍檢查", CurrentValue = false, Callback = function(v) ESPTeamCheck = v end})
+ESPTab:CreateSlider({Name = "最大距離", Range = {100, 5000}, Increment = 100, CurrentValue = 1000, Callback = function(Value) ESPMaxDistance = Value end})
+
+-- 飛行分页
+local FlyTab = Window:CreateTab("✈️ 飛行", 4483362458)
+FlyTab:CreateToggle({Name = "啟用飛行", CurrentValue = false, Callback = function(Value) FlyEnabled = Value; if Value then startFly() else stopFly() end end})
+FlyTab:CreateSlider({Name = "飛行速度", Range = {10, 200}, Increment = 5, CurrentValue = 50, Callback = function(Value) FlySpeed = Value end})
+FlyTab:CreateLabel("WASD移動 | 空白鍵上升 | Ctrl下降")
+
+-- 传送分页
+local TeleportTab = Window:CreateTab("📍 传送", 4483362458)
+
+-- 记录当前选中的玩家名
+local selectedPlayerName = nil
+local playerDropdown = TeleportTab:CreateDropdown({
+    Name = "选择玩家",
+    Options = getPlayerList(),
+    CurrentOption = {},
+    Callback = function(Value)
+        selectedPlayerName = Value[1]
+    end
+})
+
+TeleportTab:CreateButton({Name = "刷新玩家列表", Callback = function()
+    local newList = getPlayerList()
+    playerDropdown:Set(newList)
+end})
+
+TeleportTab:CreateButton({Name = "传送到他", Callback = function()
+    if not selectedPlayerName then
+        Rayfield:Notify({Title = "提示", Content = "请先选择玩家", Duration = 2})
+        return
+    end
+    local targetPlayer = Players:FindFirstChild(selectedPlayerName)
+    if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        teleportTo(targetPlayer.Character.HumanoidRootPart.Position)
+        Rayfield:Notify({Title = "传送", Content = "已传送到 " .. selectedPlayerName, Duration = 2})
+    else
+        Rayfield:Notify({Title = "错误", Content = "目标玩家不在附近或没有角色", Duration = 2})
+    end
+end})
+
+TeleportTab:CreateButton({Name = "保存当前位置", Callback = function()
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        savedGroundPosition = LocalPlayer.Character.HumanoidRootPart.Position
+        Rayfield:Notify({Title = "保存", Content = "当前位置已保存", Duration = 2})
+    else
+        Rayfield:Notify({Title = "错误", Content = "没有角色", Duration = 2})
+    end
+end})
+
+TeleportTab:CreateButton({Name = "返回保存点", Callback = function()
+    if savedGroundPosition then
+        teleportTo(savedGroundPosition)
+        Rayfield:Notify({Title = "传送", Content = "已返回保存点", Duration = 2})
+    else
+        Rayfield:Notify({Title = "错误", Content = "没有保存的位置", Duration = 2})
+    end
+end})
+
+-- ============ 運行循環 ============
+local aimbotConnection = RunService.RenderStepped:Connect(function()
+    if FOVCircle and FOVCircle.Visible then
+        FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    end
+    if not AimbotEnabled then
+        CurrentAimPos = nil
+        return
+    end
+    local target, aimPos = findAimbotTarget()
+    CurrentTarget = target
+    CurrentAimPos = aimPos
+
+    local shouldLock = false
+    if AimMode == "Always" then
+        shouldLock = true
+    elseif AimMode == "LeftClick" then
+        shouldLock = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+    elseif AimMode == "RightClick" then
+        shouldLock = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+    end
+
+    if shouldLock and CurrentAimPos then
+        if AimMethod == "Camera" then
+            local camPos = Camera.CFrame.Position
+            local targetCF = CFrame.new(camPos, CurrentAimPos)
+            if AimbotSmoothing >= 1 then
+                Camera.CFrame = targetCF
+            else
+                Camera.CFrame = Camera.CFrame:Lerp(targetCF, AimbotSmoothing)
+            end
+        elseif AimMethod == "Rivals" then
+            local screenPos, onScreen = Camera:WorldToViewportPoint(CurrentAimPos)
+            if onScreen then
+                local currentMouse = UserInputService:GetMouseLocation()
+                local targetPos = Vector2.new(screenPos.X, screenPos.Y)
+                local lerpAlpha = 1 - (math.clamp(AimbotSmoothing, 0, 0.9) * 0.9)
+                local delta = (targetPos - currentMouse) * lerpAlpha
+                mousemoverel(delta.X, delta.Y)
+            end
+        elseif AimMethod == "Mouse" then
+            local aimScreenPos = nil
+            if CurrentTarget and ESPObjects[CurrentTarget] then
+                aimScreenPos = ESPObjects[CurrentTarget].aimScreenPos
+            end
+            if not aimScreenPos then
+                local screenPos, onScreen = Camera:WorldToViewportPoint(CurrentAimPos)
+                if onScreen then aimScreenPos = Vector2.new(screenPos.X, screenPos.Y) end
+            end
+            if aimScreenPos then
+                pcall(function()
+                    UserInputService:SetMouseLocation(math.floor(aimScreenPos.X), math.floor(aimScreenPos.Y))
+                end)
+            end
+        end
+    end
+end)
+
+local espConnection = RunService.RenderStepped:Connect(function()
+    if not ESPEnabled then
+        for _, esp in pairs(ESPObjects) do
+            for _, d in pairs(esp) do
+                if d and type(d) == "userdata" and pcall(function() return d.Visible end) then
+                    pcall(function() d.Visible = false end)
+                end
+            end
+        end
+        return
+    end
+    for player, esp in pairs(ESPObjects) do
+        if player and player.Parent then
+            pcall(function() updateESP(player, esp) end)
+        end
+    end
+end)
+
+-- 玩家加入/離開
+for _, player in ipairs(Players:GetPlayers()) do
+    if player ~= LocalPlayer then createESP(player) end
+end
+Players.PlayerAdded:Connect(createESP)
+Players.PlayerRemoving:Connect(removeESP)
+
+-- 飛行輸入
+local flyInputBeganConn = UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if not FlyEnabled then return end
+    if input.KeyCode == Enum.KeyCode.W then FlyKeys.W = true end
+    if input.KeyCode == Enum.KeyCode.S then FlyKeys.S = true end
+    if input.KeyCode == Enum.KeyCode.A then FlyKeys.A = true end
+    if input.KeyCode == Enum.KeyCode.D then FlyKeys.D = true end
+    if input.KeyCode == Enum.KeyCode.Space then FlyKeys.Space = true end
+    if input.KeyCode == Enum.KeyCode.LeftControl then FlyKeys.LCtrl = true end
+end)
+
+local flyInputEndedConn = UserInputService.InputEnded:Connect(function(input)
+    if input.KeyCode == Enum.KeyCode.W then FlyKeys.W = false end
+    if input.KeyCode == Enum.KeyCode.S then FlyKeys.S = false end
+    if input.KeyCode == Enum.KeyCode.A then FlyKeys.A = false end
+    if input.KeyCode == Enum.KeyCode.D then FlyKeys.D = false end
+    if input.KeyCode == Enum.KeyCode.Space then FlyKeys.Space = false end
+    if input.KeyCode == Enum.KeyCode.LeftControl then FlyKeys.LCtrl = false end
+end)
+
+-- ============ 初始化侦察 ============
+task.spawn(function()
+    task.wait(3)
+    scanForAntiCheat()
+end)
+
+local lastScan = 0
+RunService.Heartbeat:Connect(function()
+    if AntiAntiCheat.Enabled and tick() - lastScan > 25 then
+        lastScan = tick()
+        task.spawn(scanForAntiCheat)
+    end
+end)
+
+-- 載入完成
+Rayfield:Notify({
+    Title = "✅ 載入完成",
+    Content = "反反作弊侦察系统已就绪",
+    Duration = 5,
+    Image = 4483362458,
+})
+print("终极战斗辅助 - 反反作弊侦察完整版 已加载")
