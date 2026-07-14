@@ -116,6 +116,11 @@ local FlyBodyVelocity = nil
 -- 传送
 local savedGroundPosition = nil
 
+-- 弹射
+local selectedTargetName = nil
+local flingConnection = nil
+local stayingConnection = nil
+
 -- ============ 飛行系統 ============
 local function stopFly()
     pcall(function()
@@ -170,6 +175,9 @@ end)
 LocalPlayer.CharacterAdded:Connect(function()
     task.wait(0.6)
     if FlyEnabled then startFly() end
+    -- 清理弹射连接
+    if flingConnection then flingConnection:Disconnect() end
+    if stayingConnection then stayingConnection:Disconnect() end
 end)
 
 -- FOV 圓圈
@@ -394,6 +402,60 @@ local function getPlayerList()
     return list
 end
 
+-- ============ 弹射功能函数 ============
+local function getValidPlayerNamesForFling()
+    local names = {}
+    for _, obj in ipairs(Workspace:GetChildren()) do
+        if obj:IsA("Model") and obj.PrimaryPart ~= nil and obj.PrimaryPart.Name == "HumanoidRootPart" then
+            if obj.Name ~= LocalPlayer.Name and obj.Name ~= "EffectLoader" then
+                table.insert(names, obj.Name)
+            end
+        end
+    end
+    return names
+end
+
+local function getTargetRootForFling()
+    if type(selectedTargetName) ~= "string" or selectedTargetName == "" then return nil end
+    local targetModel = Workspace:FindFirstChild(selectedTargetName)
+    return (targetModel and targetModel:IsA("Model")) and targetModel:FindFirstChild("HumanoidRootPart") or nil
+end
+
+local function getLocalRootForFling()
+    local character = LocalPlayer.Character
+    return character and character:FindFirstChild("HumanoidRootPart") or nil
+end
+
+local function startElevatorFling()
+    if flingConnection then flingConnection:Disconnect() end
+    flingConnection = RunService.Heartbeat:Connect(function()
+        local myRoot, targetRoot = getLocalRootForFling(), getTargetRootForFling()
+        local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if myRoot and targetRoot and humanoid then
+            humanoid.PlatformStand = true
+            myRoot.CFrame = targetRoot.CFrame * CFrame.new(0, -1, 0)
+            myRoot.AssemblyLinearVelocity = Vector3.new(0, 50000, 0)
+            myRoot.AssemblyAngularVelocity = Vector3.new(50000, 50000, 50000)
+        end
+    end)
+end
+
+local function startStayingAtCenter()
+    if stayingConnection then stayingConnection:Disconnect() end
+    stayingConnection = RunService.Heartbeat:Connect(function()
+        local lobby = Workspace:FindFirstChild("RegularLobby")
+        local myHRP = getLocalRootForFling()
+        if lobby and myHRP then
+            local pos = (lobby:IsA("Model") and lobby.PrimaryPart) and lobby.PrimaryPart.Position or (lobby:IsA("BasePart") and lobby.Position)
+            if pos then
+                myHRP.CFrame = CFrame.new(pos + Vector3.new(0, 20, 0)) * myHRP.CFrame.Rotation
+                myHRP.AssemblyLinearVelocity = Vector3.zero
+                myHRP.AssemblyAngularVelocity = Vector3.zero
+            end
+        end
+    end)
+end
+
 -- ============ UI 建立 ============
 local Window = Rayfield:CreateWindow({
     Name = "终极战斗辅助 - 反反作弊版",
@@ -421,6 +483,8 @@ AACTab:CreateButton({Name = "銷毀腳本", Callback = function()
     pcall(function() espConnection:Disconnect() end)
     pcall(function() flyInputBeganConn:Disconnect() end)
     pcall(function() flyInputEndedConn:Disconnect() end)
+    if flingConnection then flingConnection:Disconnect() end
+    if stayingConnection then stayingConnection:Disconnect() end
     stopFly(); clearAllESP()
     if FOVCircle then pcall(function() FOVCircle:Remove() end) end
     getgenv().UltimateCombatLoaded = false
@@ -498,7 +562,7 @@ ESPTab:CreateToggle({Name = "顯示武器", CurrentValue = true, Callback = func
 ESPTab:CreateToggle({Name = "顯示追蹤線", CurrentValue = true, Callback = function(v) ESPShowTracers = v end})
 ESPTab:CreateToggle({Name = "顯示頭點", CurrentValue = true, Callback = function(v) ESPShowHeadDot = v end})
 ESPTab:CreateToggle({Name = "隊伍檢查", CurrentValue = false, Callback = function(v) ESPTeamCheck = v end})
-ESPTab:CreateSlider({Name = "最大距離", Range = {100, 5000}, Increment = 100, CurrentValue = 1000, Callback = function(Value) ESPMaxDistance = Value end})
+ESPTab:CreateSlider({Name = "最大距離", Range = {100, 20000}, Increment = 100, CurrentValue = 1000, Callback = function(Value) ESPMaxDistance = Value end})
 
 -- 飛行分页
 local FlyTab = Window:CreateTab("✈️ 飛行", 4483362458)
@@ -509,31 +573,30 @@ FlyTab:CreateLabel("WASD移動 | 空白鍵上升 | Ctrl下降")
 -- 传送分页
 local TeleportTab = Window:CreateTab("📍 传送", 4483362458)
 
--- 记录当前选中的玩家名
-local selectedPlayerName = nil
+local selectedTeleportPlayerName = nil
 local playerDropdown = TeleportTab:CreateDropdown({
     Name = "选择玩家",
     Options = getPlayerList(),
     CurrentOption = {},
     Callback = function(Value)
-        selectedPlayerName = Value[1]
+        selectedTeleportPlayerName = Value[1]
     end
 })
 
 TeleportTab:CreateButton({Name = "刷新玩家列表", Callback = function()
     local newList = getPlayerList()
-    playerDropdown:Set(newList)
+    playerDropdown:Refresh(newList, true)
 end})
 
 TeleportTab:CreateButton({Name = "传送到他", Callback = function()
-    if not selectedPlayerName then
+    if not selectedTeleportPlayerName then
         Rayfield:Notify({Title = "提示", Content = "请先选择玩家", Duration = 2})
         return
     end
-    local targetPlayer = Players:FindFirstChild(selectedPlayerName)
+    local targetPlayer = Players:FindFirstChild(selectedTeleportPlayerName)
     if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
         teleportTo(targetPlayer.Character.HumanoidRootPart.Position)
-        Rayfield:Notify({Title = "传送", Content = "已传送到 " .. selectedPlayerName, Duration = 2})
+        Rayfield:Notify({Title = "传送", Content = "已传送到 " .. selectedTeleportPlayerName, Duration = 2})
     else
         Rayfield:Notify({Title = "错误", Content = "目标玩家不在附近或没有角色", Duration = 2})
     end
@@ -556,6 +619,47 @@ TeleportTab:CreateButton({Name = "返回保存点", Callback = function()
         Rayfield:Notify({Title = "错误", Content = "没有保存的位置", Duration = 2})
     end
 end})
+
+-- 弹射分页
+local FlingTab = Window:CreateTab("⚡ 弹射", 4483362458)
+
+local flingDropdown = FlingTab:CreateDropdown({
+    Name = "选择目标玩家 (弹射)",
+    Options = getValidPlayerNamesForFling(),
+    CurrentOption = {""},
+    Callback = function(Value) selectedTargetName = type(Value) == "table" and Value[1] or Value end,
+})
+
+FlingTab:CreateButton({ Name = "刷新目标列表", Callback = function() flingDropdown:Refresh(getValidPlayerNamesForFling(), true) end })
+
+FlingTab:CreateToggle({
+    Name = "【并行】无延迟虚空起飞",
+    Callback = function(Value)
+        if Value then startElevatorFling() else if flingConnection then flingConnection:Disconnect() end end
+    end,
+})
+
+FlingTab:CreateToggle({
+    Name = "【并行】一直回到 RegularLobby 上方 20 格",
+    Callback = function(Value)
+        if Value then startStayingAtCenter() else if stayingConnection then stayingConnection:Disconnect() end end
+    end,
+})
+
+FlingTab:CreateButton({
+    Name = "🏠 手动回城",
+    Callback = function() 
+        local lobby = Workspace:FindFirstChild("RegularLobby")
+        local myHRP = getLocalRootForFling()
+        if lobby and myHRP then
+            local pos = (lobby:IsA("Model") and lobby.PrimaryPart) and lobby.PrimaryPart.Position or (lobby:IsA("BasePart") and lobby.Position)
+            if pos then
+                myHRP.CFrame = CFrame.new(pos + Vector3.new(0, 20, 0)) * myHRP.CFrame.Rotation
+                myHRP.AssemblyLinearVelocity = Vector3.zero
+            end
+        end
+    end,
+})
 
 -- ============ 運行循環 ============
 local aimbotConnection = RunService.RenderStepped:Connect(function()
